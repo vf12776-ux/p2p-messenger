@@ -16,7 +16,8 @@ export default function Chat() {
   const wsRef = useRef<WebSocket | null>(null);
 
   useEffect(() => {
-    const ws = new WebSocket(`ws://${window.location.hostname}:8080/ws`);
+    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const ws = new WebSocket(`${protocol}//${window.location.host}/ws`);
     wsRef.current = ws;
 
     ws.onopen = () => {
@@ -34,13 +35,11 @@ export default function Chat() {
       setIsConnected(false);
     };
 
-    return () => {
-      ws.close();
-    };
+    return () => ws.close();
   }, []);
 
   const sendMessage = (text: string, isFile = false, fileUrl = '', fileName = '') => {
-    if (!wsRef.current) return;
+    if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return;
     const msg: Message = { username, text, isFile, fileUrl, fileName };
     wsRef.current.send(JSON.stringify(msg));
   };
@@ -59,41 +58,48 @@ export default function Chat() {
     formData.append('file', file);
 
     try {
-      const response = await fetch(`http://${window.location.hostname}:8080/upload`, {
-        method: 'POST',
-        body: formData,
-      });
-      const downloadUrl = await response.text(); // "/download/filename"
+      const response = await fetch('/upload', { method: 'POST', body: formData });
+      const downloadUrl = await response.text();
       sendMessage(`Файл: ${file.name}`, true, downloadUrl, file.name);
     } catch (err) {
       console.error('Upload failed', err);
+      alert('Ошибка загрузки файла');
     }
   };
 
   if (!username) {
     return (
-      <div>
-        <h2>Enter your name</h2>
+      <div style={{ padding: '20px' }}>
+        <h2>Введите ваше имя</h2>
         <input
           type="text"
           value={username}
           onChange={(e) => setUsername(e.target.value)}
-          placeholder="Username"
+          placeholder="Имя"
+          style={{ marginRight: '10px' }}
         />
-        <button onClick={() => username && setUsername(username)}>Join</button>
+        <button onClick={() => username && setUsername(username)}>Войти</button>
       </div>
     );
   }
 
   return (
-    <div>
-      <h2>Chat as {username}</h2>
-      <div style={{ height: '300px', overflowY: 'scroll', border: '1px solid black', marginBottom: '10px', padding: '5px' }}>
+    <div style={{ padding: '20px' }}>
+      <h2>Чат: {username}</h2>
+      <div
+        style={{
+          height: '300px',
+          overflowY: 'scroll',
+          border: '1px solid #ccc',
+          marginBottom: '10px',
+          padding: '5px',
+        }}
+      >
         {messages.map((msg, idx) => (
           <div key={idx}>
             <strong>{msg.username}:</strong>{' '}
             {msg.isFile ? (
-              <a href={`http://${window.location.hostname}:8080${msg.fileUrl}`} target="_blank" rel="noopener noreferrer">
+              <a href={msg.fileUrl} target="_blank" rel="noopener noreferrer">
                 {msg.text}
               </a>
             ) : (
@@ -102,16 +108,19 @@ export default function Chat() {
           </div>
         ))}
       </div>
-      <input
-        type="text"
-        value={input}
-        onChange={(e) => setInput(e.target.value)}
-        onKeyDown={(e) => e.key === 'Enter' && handleSendText()}
-        placeholder="Message"
-      />
-      <button onClick={handleSendText}>Send</button>
-      <input type="file" onChange={handleFileUpload} />
-      <div>Status: {isConnected ? 'Connected' : 'Disconnected'}</div>
+      <div style={{ display: 'flex', gap: '10px', alignItems: 'center' }}>
+        <input
+          type="text"
+          value={input}
+          onChange={(e) => setInput(e.target.value)}
+          onKeyDown={(e) => e.key === 'Enter' && handleSendText()}
+          placeholder="Сообщение"
+          style={{ flex: 1 }}
+        />
+        <button onClick={handleSendText}>Отправить</button>
+        <input type="file" onChange={handleFileUpload} />
+      </div>
+      <div style={{ marginTop: '10px' }}>Статус: {isConnected ? 'Подключено' : 'Отключено'}</div>
     </div>
   );
 }
