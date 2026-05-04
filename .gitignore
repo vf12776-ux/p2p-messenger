@@ -1,0 +1,5 @@
+dist/
+node_modules/
+server/uploads/
+server/app
+.env
