@@ -1,19 +1,26 @@
 import { useState, useEffect, useRef } from 'react';
 
 interface Message {
+  id: string;
   username: string;
+  to?: string;
   text: string;
   isFile?: boolean;
   fileUrl?: string;
   fileName?: string;
+  type?: string;
+  timestamp: number;
 }
 
 export default function Chat() {
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState('');
   const [username, setUsername] = useState('');
+  const [users, setUsers] = useState<string[]>([]);
+  const [selectedTo, setSelectedTo] = useState(''); // empty = всем
   const [isConnected, setIsConnected] = useState(false);
   const wsRef = useRef<WebSocket | null>(null);
+  const messagesEndRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -21,27 +28,58 @@ export default function Chat() {
     wsRef.current = ws;
 
     ws.onopen = () => {
-      console.log('Connected');
+      console.log('WS connected');
       setIsConnected(true);
     };
 
     ws.onmessage = (event) => {
-      const msg: Message = JSON.parse(event.data);
-      setMessages((prev) => [...prev, msg]);
+      const data = JSON.parse(event.data);
+      if (data.type === 'userList') {
+        setUsers(data.text.split(',').filter((u: string) => u !== username));
+      } else if (data.type === 'delete') {
+        setMessages(prev => prev.filter(m => m.id !== data.id));
+      } else if (data.type === 'msg' || data.type === '') {
+        setMessages(prev => [...prev, data]);
+      } else if (data.type === 'error') {
+        alert(data.text);
+      }
     };
 
     ws.onclose = () => {
-      console.log('Disconnected');
       setIsConnected(false);
     };
 
     return () => ws.close();
   }, []);
 
+  // Auto-scroll
+  useEffect(() => {
+    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [messages]);
+
+  const sendHello = () => {
+    if (!wsRef.current || !username) return;
+    wsRef.current.send(JSON.stringify({ type: 'hello', username }));
+  };
+
   const sendMessage = (text: string, isFile = false, fileUrl = '', fileName = '') => {
-    if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return;
-    const msg: Message = { username, text, isFile, fileUrl, fileName };
+    if (!wsRef.current) return;
+    const msg: any = {
+      type: 'msg',
+      username,
+      text,
+      isFile,
+      fileUrl,
+      fileName,
+      to: selectedTo || '',
+      timestamp: Date.now(),
+    };
     wsRef.current.send(JSON.stringify(msg));
+  };
+
+  const deleteMessage = (id: string) => {
+    if (!wsRef.current) return;
+    wsRef.current.send(JSON.stringify({ type: 'delete', id }));
   };
 
   const handleSendText = () => {
@@ -53,74 +91,104 @@ export default function Chat() {
   const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
-
     const formData = new FormData();
     formData.append('file', file);
-
     try {
       const response = await fetch('/upload', { method: 'POST', body: formData });
       const downloadUrl = await response.text();
       sendMessage(`Файл: ${file.name}`, true, downloadUrl, file.name);
     } catch (err) {
-      console.error('Upload failed', err);
-      alert('Ошибка загрузки файла');
+      console.error(err);
+      alert('Ошибка загрузки');
     }
   };
 
   if (!username) {
     return (
-      <div style={{ padding: '20px' }}>
-        <h2>Введите ваше имя</h2>
+      <div style={{ maxWidth: '400px', margin: '50px auto', textAlign: 'center' }}>
+        <h2>P2P Messenger</h2>
         <input
           type="text"
           value={username}
           onChange={(e) => setUsername(e.target.value)}
-          placeholder="Имя"
-          style={{ marginRight: '10px' }}
+          placeholder="Ваше имя"
+          style={{ padding: '10px', width: '80%', marginBottom: '10px' }}
         />
-        <button onClick={() => username && setUsername(username)}>Войти</button>
+        <button onClick={sendHello} style={{ padding: '10px 20px' }}>Войти</button>
       </div>
     );
   }
 
   return (
-    <div style={{ padding: '20px' }}>
-      <h2>Чат: {username}</h2>
-      <div
-        style={{
-          height: '300px',
-          overflowY: 'scroll',
-          border: '1px solid #ccc',
-          marginBottom: '10px',
-          padding: '5px',
-        }}
-      >
-        {messages.map((msg, idx) => (
-          <div key={idx}>
-            <strong>{msg.username}:</strong>{' '}
-            {msg.isFile ? (
-              <a href={msg.fileUrl} target="_blank" rel="noopener noreferrer">
-                {msg.text}
-              </a>
-            ) : (
-              msg.text
+    <div style={{ display: 'flex', height: '100vh', flexDirection: 'column', maxWidth: '1200px', margin: '0 auto' }}>
+      {/* Header */}
+      <div style={{ padding: '10px', background: '#f0f0f0', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+        <span>Чат: {username}</span>
+        <select value={selectedTo} onChange={e => setSelectedTo(e.target.value)} style={{ padding: '5px' }}>
+          <option value="">Всем</option>
+          {users.map(u => <option key={u} value={u}>{u}</option>)}
+        </select>
+        <span style={{ fontSize: '12px', color: isConnected ? 'green' : 'red' }}>
+          {isConnected ? '● Онлайн' : '○ Офлайн'}
+        </span>
+      </div>
+
+      {/* Messages area */}
+      <div style={{ flex: 1, overflowY: 'auto', padding: '10px', background: '#fff' }}>
+        {messages.map((msg) => (
+          <div key={msg.id} style={{
+            marginBottom: '12px',
+            textAlign: msg.username === username ? 'right' : 'left',
+            display: 'flex',
+            alignItems: 'baseline',
+            gap: '8px',
+            flexWrap: 'wrap',
+            justifyContent: msg.username === username ? 'flex-end' : 'flex-start'
+          }}>
+            <div style={{
+              background: msg.username === username ? '#dcf8c5' : '#fff',
+              border: '1px solid #ddd',
+              borderRadius: '12px',
+              padding: '8px 12px',
+              maxWidth: '70%',
+              display: 'inline-block'
+            }}>
+              <div style={{ fontSize: '12px', color: '#555', marginBottom: '4px' }}>
+                {msg.username} {msg.to ? `→ ${msg.to}` : ''}
+              </div>
+              {msg.isFile ? (
+                <a href={msg.fileUrl} target="_blank" rel="noopener noreferrer">{msg.text}</a>
+              ) : (
+                <div>{msg.text}</div>
+              )}
+              <div style={{ fontSize: '10px', color: '#aaa', marginTop: '4px' }}>
+                {new Date(msg.timestamp).toLocaleTimeString()}
+              </div>
+            </div>
+            {msg.username === username && (
+              <button onClick={() => deleteMessage(msg.id)} style={{ background: 'none', border: 'none', color: 'red', cursor: 'pointer' }}>🗑️</button>
             )}
           </div>
         ))}
+        <div ref={messagesEndRef} />
       </div>
-      <div style={{ display: 'flex', gap: '10px', alignItems: 'center' }}>
+
+      {/* Input area */}
+      <div style={{ padding: '10px', background: '#f0f0f0', display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
         <input
           type="text"
           value={input}
           onChange={(e) => setInput(e.target.value)}
           onKeyDown={(e) => e.key === 'Enter' && handleSendText()}
-          placeholder="Сообщение"
-          style={{ flex: 1 }}
+          placeholder="Сообщение..."
+          style={{ flex: 1, padding: '10px', borderRadius: '20px', border: '1px solid #ccc' }}
         />
-        <button onClick={handleSendText}>Отправить</button>
-        <input type="file" onChange={handleFileUpload} />
+        <button onClick={handleSendText} style={{ padding: '10px 20px', borderRadius: '20px', border: 'none', background: '#007bff', color: 'white' }}>➤</button>
+        <label style={{ background: '#28a745', padding: '10px 15px', borderRadius: '20px', color: 'white', cursor: 'pointer' }}>
+          📎
+          <input type="file" onChange={handleFileUpload} style={{ display: 'none' }} />
+        </label>
       </div>
-      <div style={{ marginTop: '10px' }}>Статус: {isConnected ? 'Подключено' : 'Отключено'}</div>
     </div>
   );
 }
