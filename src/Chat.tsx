@@ -136,11 +136,11 @@ export default function Chat() {
     }
   };
 
-  const isImageFile = (fileName?: string): boolean => {
-    if (!fileName) return false;
-    const ext = fileName.split('.').pop()?.toLowerCase();
-    return ['jpg', 'jpeg', 'png', 'gif', 'webp', 'svg'].includes(ext || '');
-  };
+  const isImageFile = (fileUrl?: string): boolean => {
+  if (!fileUrl) return false;
+  const ext = fileUrl.split('.').pop()?.toLowerCase();
+  return ['jpg', 'jpeg', 'png', 'gif', 'webp', 'svg'].includes(ext || '');
+};
 
   // Запуск подключения после входа в чат
   useEffect(() => {
@@ -206,20 +206,20 @@ export default function Chat() {
               display: 'inline-block',
               opacity: msg.pending ? 0.5 : 1
             }}>
-              <div style={{ fontSize: '12px', color: '#555', marginBottom: '4px' }}>
-                {msg.username} {msg.to && msg.to !== username ? `→ ${msg.to}` : ''}
-              </div>
+              <div style={{ fontSize: '15px', fontWeight: 'bold', color: '#000', marginBottom: '4px' }}>
+  {msg.username} {msg.to && msg.to !== username ? `→ ${msg.to}` : ''}
+</div>
               {msg.isFile ? (
-                isImageFile(msg.fileName) ? (
-                  <a href={msg.fileUrl} target="_blank" rel="noopener noreferrer">
-                    <img src={msg.fileUrl} alt={msg.fileName} style={{ maxWidth: '200px', maxHeight: '200px', borderRadius: '8px' }} />
-                  </a>
-                ) : (
-                  <a href={msg.fileUrl} target="_blank" rel="noopener noreferrer">{msg.text}</a>
-                )
-              ) : (
-                <div>{msg.text}</div>
-              )}
+  isImageFile(msg.fileName) ? (
+    <a href={msg.fileUrl} target="_blank" rel="noopener noreferrer">
+      <img src={msg.fileUrl} alt={msg.fileName} style={{ maxWidth: '200px', maxHeight: '200px', borderRadius: '8px' }} />
+    </a>
+  ) : (
+    <a href={msg.fileUrl} target="_blank" rel="noopener noreferrer">{msg.text}</a>
+  )
+) : (
+  <div>{msg.text}</div>
+)}
               <div style={{ fontSize: '10px', color: '#aaa', marginTop: '4px' }}>
                 {new Date(msg.timestamp).toLocaleTimeString()}
                 {msg.pending && ' (⌛)'}
