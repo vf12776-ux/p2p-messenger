@@ -15,7 +15,6 @@ export default function Chat() {
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState('');
   const [username, setUsername] = useState('');
-  const [users, setUsers] = useState<string[]>([]);
   const [isConnected, setIsConnected] = useState(false);
   const [isJoined, setIsJoined] = useState(false);
   const wsRef = useRef<WebSocket | null>(null);
@@ -43,23 +42,13 @@ export default function Chat() {
 
     ws.onmessage = (event) => {
       const data = JSON.parse(event.data);
-      if (data.type === 'userList') {
-        if (typeof data.text === 'string') {
-          const usersArray = data.text.split(',');
-          const filtered = [];
-          for (let i = 0; i < usersArray.length; i++) {
-            const name = usersArray[i];
-            if (name && name !== username) filtered.push(name);
-          }
-          setUsers(filtered);
-        } else {
-          setUsers([]);
-        }
-      } else if (data.type === 'delete') {
+      if (data.type === 'delete') {
         setMessages(prev => prev.filter(m => m.id !== data.id));
       } else if (data.type === 'msg' || data.type === '') {
         setMessages(prev => [...prev, data]);
         pendingMessagesRef.current = pendingMessagesRef.current.filter(p => p.id !== data.id);
+      } else if (data.type === 'userList') {
+        // Игнорируем – список пользователей не показываем
       }
     };
 
