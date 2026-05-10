@@ -189,6 +189,7 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 		if incoming.ID == "" {
 			incoming.ID = uuid.New().String()
 		}
+		client.conn.WriteJSON(Message{Type: "ack", ID: incoming.ID})
 		if incoming.Timestamp == 0 {
 			incoming.Timestamp = time.Now().Unix()
 		}
@@ -197,6 +198,8 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 			if err := saveMessageToDB(incoming); err != nil {
 				log.Println("Failed to save message to DB:", err)
 			}
+			// Отправляем подтверждение клиенту
+			conn.WriteJSON(Message{Type: "ack", ID: incoming.ID})
 		}
 		broadcast <- incoming
 	}
