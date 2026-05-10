@@ -3,15 +3,12 @@ import { useState, useEffect, useRef } from 'react';
 interface Message {
   id: string;
   username: string;
-  to?: string;
   text: string;
   isFile?: boolean;
   fileUrl?: string;
   fileName?: string;
   type?: string;
   timestamp: number;
-  pending?: boolean;
-  status?: string;
 }
 
 export default function Chat() {
@@ -19,7 +16,6 @@ export default function Chat() {
   const [input, setInput] = useState('');
   const [username, setUsername] = useState('');
   const [users, setUsers] = useState<string[]>([]);
-  const [selectedTo, setSelectedTo] = useState('');
   const [isConnected, setIsConnected] = useState(false);
   const [isJoined, setIsJoined] = useState(false);
   const wsRef = useRef<WebSocket | null>(null);
@@ -47,42 +43,23 @@ export default function Chat() {
 
     ws.onmessage = (event) => {
       const data = JSON.parse(event.data);
-      switch (data.type) {
-        case 'userList':
-  if (typeof data.text === 'string') {
-    const usersArray = data.text.split(',');
-    const filteredUsers = [];
-    for (let i = 0; i < usersArray.length; i++) {
-      const name = usersArray[i];
-      if (name && name !== username) {
-        filteredUsers.push(name);
-      }
-    }
-    setUsers(filteredUsers);
-  } else {
-    setUsers([]);
-  }
-  break;
-        case 'delete':
-          setMessages(prev => prev.filter(m => m.id !== data.id));
-          break;
-        case 'ack':
-          setMessages(prev => prev.map(m => m.id === data.id ? { ...m, pending: false, status: 'sent' } : m));
-          pendingMessagesRef.current = pendingMessagesRef.current.filter(p => p.id !== data.id);
-          break;
-        case 'delivered':
-          setMessages(prev => prev.map(m => m.id === data.id ? { ...m, status: 'delivered' } : m));
-          break;
-        case 'read':
-          setMessages(prev => prev.map(m => m.id === data.id ? { ...m, status: 'read' } : m));
-          break;
-        case 'msg':
-          setMessages(prev => [...prev, data]);
-          break;
-        default:
-          if (data.type === '' || !data.type) {
-            setMessages(prev => [...prev, data]);
+      if (data.type === 'userList') {
+        if (typeof data.text === 'string') {
+          const usersArray = data.text.split(',');
+          const filtered = [];
+          for (let i = 0; i < usersArray.length; i++) {
+            const name = usersArray[i];
+            if (name && name !== username) filtered.push(name);
           }
+          setUsers(filtered);
+        } else {
+          setUsers([]);
+        }
+      } else if (data.type === 'delete') {
+        setMessages(prev => prev.filter(m => m.id !== data.id));
+      } else if (data.type === 'msg' || data.type === '') {
+        setMessages(prev => [...prev, data]);
+        pendingMessagesRef.current = pendingMessagesRef.current.filter(p => p.id !== data.id);
       }
     };
 
@@ -104,20 +81,9 @@ export default function Chat() {
     };
   }, [isJoined]);
 
-  // Авто-скролл вниз
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages]);
-
-  // Отправка read для сообщений, адресованных текущему пользователю
-  useEffect(() => {
-    const unread = messages.filter(m => m.to === username && m.status !== 'read' && m.username !== username);
-    unread.forEach(m => {
-      if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-        wsRef.current.send(JSON.stringify({ type: 'read', id: m.id }));
-      }
-    });
-  }, [messages, username]);
 
   const sendMessage = (text: string, isFile = false, fileUrl = '', fileName = '') => {
     const msg: any = {
@@ -128,9 +94,7 @@ export default function Chat() {
       isFile,
       fileUrl,
       fileName,
-      to: selectedTo || '',
       timestamp: Date.now(),
-      pending: true,
     };
     setMessages(prev => [...prev, msg]);
     if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
@@ -143,13 +107,6 @@ export default function Chat() {
   const deleteMessage = (id: string) => {
     if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return;
     wsRef.current.send(JSON.stringify({ type: 'delete', id }));
-  };
-
-  const clearChat = async () => {
-    if (confirm('Удалить всю историю чата?') && wsRef.current) {
-      await fetch('/clear-chat', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ username }) });
-      setMessages([]);
-    }
   };
 
   const handleSendText = () => {
@@ -173,10 +130,10 @@ export default function Chat() {
     }
   };
 
-  const isImageFile = (fileUrl?: string): boolean => {
-    if (!fileUrl) return false;
-    const ext = fileUrl.split('.').pop()?.toLowerCase();
-    return ['jpg', 'jpeg', 'png', 'gif', 'webp', 'svg'].includes(ext || '');
+  const isImageFile = (url?: string): boolean => {
+    if (!url) return false;
+    const ext = url.split('.').pop()?.toLowerCase();
+    return ext === 'jpg' || ext === 'jpeg' || ext === 'png' || ext === 'gif' || ext === 'webp';
   };
 
   if (!isJoined) {
@@ -199,12 +156,7 @@ export default function Chat() {
     <div style={{ display: 'flex', height: '100vh', flexDirection: 'column', maxWidth: '1200px', margin: '0 auto' }}>
       <div style={{ padding: '10px', background: '#f0f0f0', display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '10px', flexWrap: 'wrap' }}>
         <span>Чат: {username}</span>
-        <select value={selectedTo} onChange={e => setSelectedTo(e.target.value)} style={{ padding: '5px' }}>
-          <option value="">Всем</option>
-          {users.map(u => <option key={u} value={u}>{u}</option>)}
-        </select>
         <span style={{ fontSize: '12px', color: isConnected ? 'green' : 'red' }}>{isConnected ? '● Онлайн' : '○ Офлайн'}</span>
-        <button onClick={clearChat} style={{ background: '#dc3545', color: 'white', border: 'none', borderRadius: '5px', padding: '5px 10px' }}>Очистить чат</button>
       </div>
 
       <div style={{ flex: 1, overflowY: 'auto', padding: '10px', background: '#fff' }}>
@@ -224,33 +176,25 @@ export default function Chat() {
               borderRadius: '12px',
               padding: '8px 12px',
               maxWidth: '70%',
-              display: 'inline-block',
-              opacity: msg.pending ? 0.7 : 1
+              display: 'inline-block'
             }}>
               <div style={{ fontSize: '15px', fontWeight: 'bold', color: '#000', marginBottom: '4px' }}>
-                {msg.username} {msg.to && msg.to !== username ? `→ ${msg.to}` : ''}
+                {msg.username}
               </div>
               {msg.isFile ? (
                 isImageFile(msg.fileUrl) ? (
-                  <a href={msg.fileUrl} target="_blank" rel="noopener noreferrer">
-                    <img src={msg.fileUrl} alt={msg.fileName} style={{ maxWidth: '200px', maxHeight: '200px', borderRadius: '8px' }} />
-                  </a>
+                  <img src={msg.fileUrl} alt={msg.fileName} style={{ maxWidth: '200px', maxHeight: '200px', borderRadius: '8px' }} />
                 ) : (
                   <a href={msg.fileUrl} target="_blank" rel="noopener noreferrer">{msg.text}</a>
                 )
               ) : (
                 <div>{msg.text}</div>
               )}
-              <div style={{ fontSize: '10px', color: '#aaa', marginTop: '4px', display: 'flex', gap: '8px' }}>
-                <span>{new Date(msg.timestamp).toLocaleTimeString()}</span>
-                {msg.pending ? <span>⌛</span> : (
-                  msg.status === 'sent' ? <span>✓</span> :
-                  msg.status === 'delivered' ? <span>✓✓</span> :
-                  msg.status === 'read' ? <span style={{ color: '#4caf50' }}>✓✓</span> : null
-                )}
+              <div style={{ fontSize: '10px', color: '#aaa', marginTop: '4px' }}>
+                {new Date(msg.timestamp).toLocaleTimeString()}
               </div>
             </div>
-            {msg.username === username && !msg.pending && (
+            {msg.username === username && (
               <button onClick={() => deleteMessage(msg.id)} style={{ background: 'none', border: 'none', color: 'red', cursor: 'pointer', fontSize: '18px' }}>🗑️</button>
             )}
           </div>

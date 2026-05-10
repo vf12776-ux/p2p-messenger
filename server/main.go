@@ -2,7 +2,6 @@ package main
 
 import (
 	"database/sql"
-	"encoding/json"
 	"io"
 	"log"
 	"net/http"
@@ -22,14 +21,12 @@ var upgrader = websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { retu
 type Message struct {
 	ID        string `json:"id"`
 	Username  string `json:"username"`
-	To        string `json:"to,omitempty"`
 	Text      string `json:"text"`
 	IsFile    bool   `json:"isFile,omitempty"`
 	FileUrl   string `json:"fileUrl,omitempty"`
 	FileName  string `json:"fileName,omitempty"`
 	Type      string `json:"type"`
 	Timestamp int64  `json:"timestamp"`
-	Status    string `json:"status"`
 }
 
 type Client struct {
@@ -58,14 +55,12 @@ func initDB() {
     CREATE TABLE IF NOT EXISTS messages (
         id TEXT PRIMARY KEY,
         username TEXT,
-        to_username TEXT,
         text TEXT,
         is_file BOOLEAN,
         file_name TEXT,
         file_data BYTEA,
         type TEXT,
-        timestamp BIGINT,
-        status TEXT
+        timestamp BIGINT
     );
     `
 	db.Exec(createTables)
@@ -73,20 +68,17 @@ func initDB() {
 
 func saveMessageToDB(m Message) error {
 	_, err := db.Exec(`
-        INSERT INTO messages(id, username, to_username, text, is_file, file_name, file_data, type, timestamp, status)
-        VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
-		m.ID, m.Username, m.To, m.Text, m.IsFile, m.FileName, nil, m.Type, m.Timestamp, m.Status)
+        INSERT INTO messages(id, username, text, is_file, file_name, file_data, type, timestamp)
+        VALUES($1,$2,$3,$4,$5,$6,$7,$8)`,
+		m.ID, m.Username, m.Text, m.IsFile, m.FileName, nil, m.Type, m.Timestamp)
 	return err
 }
 
-func updateMessageStatus(id, status string) {
-	db.Exec("UPDATE messages SET status=$1 WHERE id=$2", status, id)
-}
-
-func loadHistoryForUser(username string) []Message {
+func loadHistory() []Message {
 	rows, err := db.Query(`
-        SELECT id, username, to_username, text, is_file, file_name, type, timestamp, status
-        FROM messages WHERE username=$1 OR to_username=$1 ORDER BY timestamp ASC`, username)
+        SELECT id, username, text, is_file, file_name, type, timestamp
+        FROM messages ORDER BY timestamp ASC
+    `)
 	if err != nil {
 		return nil
 	}
@@ -94,11 +86,7 @@ func loadHistoryForUser(username string) []Message {
 	var msgs []Message
 	for rows.Next() {
 		var m Message
-		var toPtr sql.NullString
-		rows.Scan(&m.ID, &m.Username, &toPtr, &m.Text, &m.IsFile, &m.FileName, &m.Type, &m.Timestamp, &m.Status)
-		if toPtr.Valid {
-			m.To = toPtr.String
-		}
+		rows.Scan(&m.ID, &m.Username, &m.Text, &m.IsFile, &m.FileName, &m.Type, &m.Timestamp)
 		if m.IsFile {
 			m.FileUrl = "/api/file/" + m.ID
 		}
@@ -115,7 +103,6 @@ func main() {
 	http.HandleFunc("/ws", wsHandler)
 	http.HandleFunc("/upload", uploadHandler)
 	http.HandleFunc("/api/file/", fileHandler)
-	http.HandleFunc("/clear-chat", clearChatHandler)
 
 	staticDir := "dist"
 	http.Handle("/", http.FileServer(http.Dir(staticDir)))
@@ -124,7 +111,7 @@ func main() {
 	if port == "" {
 		port = "8080"
 	}
-	log.Printf("Server on :%s", port)
+	log.Printf("Server started on :%s", port)
 	log.Fatal(http.ListenAndServe(":"+port, nil))
 }
 
@@ -147,8 +134,7 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 	mu.Unlock()
 	broadcastUserList()
 
-	// Отправить историю
-	history := loadHistoryForUser(initMsg.Username)
+	history := loadHistory()
 	for _, msg := range history {
 		conn.WriteJSON(msg)
 	}
@@ -171,30 +157,10 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 			incoming.Timestamp = time.Now().Unix()
 		}
 
-		switch incoming.Type {
-		case "msg":
-			incoming.Status = "sent"
-			if err := saveMessageToDB(incoming); err != nil {
-				log.Println("save error:", err)
-			}
-			// Подтверждение отправителю
-			conn.WriteJSON(Message{Type: "ack", ID: incoming.ID})
+		if incoming.Type == "msg" {
+			saveMessageToDB(incoming)
 			broadcast <- incoming
-
-		case "read":
-			// Обновляем статус сообщения на "read"
-			updateMessageStatus(incoming.ID, "read")
-			// Отправляем событие всем клиентам отправителя этого сообщения
-			var sender string
-			db.QueryRow("SELECT username FROM messages WHERE id=$1", incoming.ID).Scan(&sender)
-			for c := range clients {
-				if c.username == sender {
-					c.conn.WriteJSON(Message{Type: "read", ID: incoming.ID})
-				}
-			}
-
-		case "delete":
-			// Удаляем сообщение (только если это автор)
+		} else if incoming.Type == "delete" {
 			var author string
 			db.QueryRow("SELECT username FROM messages WHERE id=$1", incoming.ID).Scan(&author)
 			if author == client.username {
@@ -209,7 +175,7 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 
 func broadcastUserList() {
 	mu.Lock()
-	var list []string
+	list := []string{}
 	for c := range clients {
 		list = append(list, c.username)
 	}
@@ -223,25 +189,8 @@ func broadcastUserList() {
 func handleMessages() {
 	for msg := range broadcast {
 		mu.Lock()
-		if msg.To == "" {
-			for c := range clients {
-				if c.username != msg.Username {
-					c.conn.WriteJSON(msg)
-				}
-			}
-		} else {
-			for c := range clients {
-				if c.username == msg.To {
-					// доставлено получателю
-					msg.Status = "delivered"
-					updateMessageStatus(msg.ID, "delivered")
-					c.conn.WriteJSON(msg)
-				}
-				if c.username == msg.Username {
-					// отправитель, отправляем ему же, но статус уже sent
-					c.conn.WriteJSON(msg)
-				}
-			}
+		for c := range clients {
+			c.conn.WriteJSON(msg)
 		}
 		mu.Unlock()
 	}
@@ -273,14 +222,11 @@ func uploadHandler(w http.ResponseWriter, r *http.Request) {
 		FileName:  handler.Filename,
 		Type:      "msg",
 		Timestamp: time.Now().Unix(),
-		Status:    "sent",
-		FileUrl:   "/api/file/" + uuid.New().String(), // временно, обновим после сохранения
 	}
-	// Сохраняем в БД с данными файла
 	_, err = db.Exec(`
-        INSERT INTO messages(id, username, to_username, text, is_file, file_name, file_data, type, timestamp, status)
-        VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
-		fileMsg.ID, "", "", fileMsg.Text, true, fileMsg.FileName, data, fileMsg.Type, fileMsg.Timestamp, fileMsg.Status)
+        INSERT INTO messages(id, username, text, is_file, file_name, file_data, type, timestamp)
+        VALUES($1,$2,$3,$4,$5,$6,$7,$8)`,
+		fileMsg.ID, "", fileMsg.Text, true, fileMsg.FileName, data, fileMsg.Type, fileMsg.Timestamp)
 	if err != nil {
 		http.Error(w, "DB error", http.StatusInternalServerError)
 		return
@@ -309,14 +255,4 @@ func fileHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", ctype)
 	w.Write(data)
-}
-
-func clearChatHandler(w http.ResponseWriter, r *http.Request) {
-	var req struct{ Username string }
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "Bad request", http.StatusBadRequest)
-		return
-	}
-	db.Exec("DELETE FROM messages WHERE username=$1 OR to_username=$1", req.Username)
-	w.WriteHeader(http.StatusOK)
 }
