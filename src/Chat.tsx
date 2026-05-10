@@ -9,6 +9,7 @@ interface Message {
   fileName?: string;
   type?: string;
   timestamp: number;
+  status?: 'pending' | 'sent'; // добавлено для статусов
 }
 
 export default function Chat() {
@@ -45,10 +46,28 @@ export default function Chat() {
       if (data.type === 'delete') {
         setMessages(prev => prev.filter(m => m.id !== data.id));
       } else if (data.type === 'msg' || data.type === '') {
-        setMessages(prev => [...prev, data]);
+        // При получении сообщения от сервера
+        setMessages(prev => {
+          // Если это сообщение уже есть (например, было отправлено с pending) – обновляем его, но обычно нет
+          const exists = prev.some(m => m.id === data.id);
+          if (exists) return prev;
+          // Для своих сообщений, пришедших из истории, ставим status: 'sent'
+          const newMsg = { ...data, status: data.username === username ? 'sent' : undefined };
+          return [...prev, newMsg];
+        });
         pendingMessagesRef.current = pendingMessagesRef.current.filter(p => p.id !== data.id);
+      } else if (data.type === 'ack') {
+        // Подтверждение от сервера – меняем статус с pending на sent
+        setMessages(prev =>
+          prev.map(msg =>
+            msg.id === data.id && msg.username === username ? { ...msg, status: 'sent' } : msg
+          )
+        );
+      } else if (data.type === 'clear_chat') {
+        // Полная очистка чата по команде сервера
+        setMessages([]);
       } else if (data.type === 'userList') {
-        // Игнорируем – список пользователей не показываем
+        // Игнорируем список пользователей
       }
     };
 
@@ -75,7 +94,7 @@ export default function Chat() {
   }, [messages]);
 
   const sendMessage = (text: string, isFile = false, fileUrl = '', fileName = '') => {
-    const msg: any = {
+    const msg: Message = {
       id: Date.now().toString() + Math.random(),
       type: 'msg',
       username,
@@ -84,6 +103,7 @@ export default function Chat() {
       fileUrl,
       fileName,
       timestamp: Date.now(),
+      status: 'pending', // начальный статус
     };
     setMessages(prev => [...prev, msg]);
     if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
@@ -96,6 +116,13 @@ export default function Chat() {
   const deleteMessage = (id: string) => {
     if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return;
     wsRef.current.send(JSON.stringify({ type: 'delete', id }));
+  };
+
+  const clearChat = () => {
+    if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return;
+    wsRef.current.send(JSON.stringify({ type: 'clear_chat' }));
+    // Локально тоже очищаем сразу (сервер всё равно пришлёт clear_chat)
+    setMessages([]);
   };
 
   const handleSendText = () => {
@@ -146,6 +173,9 @@ export default function Chat() {
       <div style={{ padding: '10px', background: '#f0f0f0', display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '10px', flexWrap: 'wrap' }}>
         <span>Чат: {username}</span>
         <span style={{ fontSize: '12px', color: isConnected ? 'green' : 'red' }}>{isConnected ? '● Онлайн' : '○ Офлайн'}</span>
+        <button onClick={clearChat} style={{ background: '#dc3545', color: 'white', border: 'none', borderRadius: '20px', padding: '5px 12px', cursor: 'pointer' }}>
+          Очистить чат
+        </button>
       </div>
 
       <div style={{ flex: 1, overflowY: 'auto', padding: '10px', background: '#fff' }}>
@@ -179,8 +209,13 @@ export default function Chat() {
               ) : (
                 <div>{msg.text}</div>
               )}
-              <div style={{ fontSize: '10px', color: '#aaa', marginTop: '4px' }}>
+              <div style={{ fontSize: '10px', color: '#aaa', marginTop: '4px', display: 'flex', alignItems: 'center', gap: '4px' }}>
                 {new Date(msg.timestamp).toLocaleTimeString()}
+                {msg.username === username && (
+                  <span style={{ fontSize: '12px' }}>
+                    {msg.status === 'pending' ? '✓' : msg.status === 'sent' ? '✓✓' : ''}
+                  </span>
+                )}
               </div>
             </div>
             {msg.username === username && (

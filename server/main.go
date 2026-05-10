@@ -159,6 +159,8 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 
 		if incoming.Type == "msg" {
 			saveMessageToDB(incoming)
+			// Отправляем подтверждение отправителю
+			conn.WriteJSON(Message{Type: "ack", ID: incoming.ID})
 			broadcast <- incoming
 		} else if incoming.Type == "delete" {
 			var author string
@@ -168,6 +170,17 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 				for c := range clients {
 					c.conn.WriteJSON(Message{Type: "delete", ID: incoming.ID})
 				}
+			}
+		} else if incoming.Type == "clear_chat" {
+			// Очистка всего чата (все сообщения у всех)
+			if client.username != "" {
+				db.Exec("DELETE FROM messages")
+				clearMsg := Message{Type: "clear_chat"}
+				mu.Lock()
+				for c := range clients {
+					c.conn.WriteJSON(clearMsg)
+				}
+				mu.Unlock()
 			}
 		}
 	}
