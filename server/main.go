@@ -6,14 +6,13 @@ import (
 	"log"
 	"net/http"
 	"os"
-	"path/filepath"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
-	_ "modernc.org/sqlite"
+	_ "github.com/lib/pq"
 )
 
 var upgrader = websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }}
@@ -28,6 +27,7 @@ type Message struct {
 	FileName  string `json:"fileName,omitempty"`
 	Type      string `json:"type"`
 	Timestamp int64  `json:"timestamp"`
+	FileData  []byte `json:"-"` // не передаём по JSON
 }
 
 type Client struct {
@@ -43,42 +43,47 @@ var (
 )
 
 func initDB() {
-	var err error
-	db, err = sql.Open("sqlite", "./messages.db")
-	if err != nil {
-		log.Fatal(err)
+	connStr := os.Getenv("DATABASE_URL") // Render даст эту переменную
+	if connStr == "" {
+		log.Fatal("DATABASE_URL is not set")
 	}
-	createTable := `
+	var err error
+	db, err = sql.Open("postgres", connStr)
+	if err != nil {
+		log.Fatal("Failed to connect to DB:", err)
+	}
+	// Создаём таблицы
+	createTables := `
     CREATE TABLE IF NOT EXISTS messages (
         id TEXT PRIMARY KEY,
         username TEXT,
         to_username TEXT,
         text TEXT,
         is_file BOOLEAN,
-        file_url TEXT,
         file_name TEXT,
+        file_data BYTEA,
         type TEXT,
-        timestamp INTEGER
+        timestamp BIGINT
     );
     `
-	_, err = db.Exec(createTable)
+	_, err = db.Exec(createTables)
 	if err != nil {
-		log.Fatal(err)
+		log.Fatal("Failed to create tables:", err)
 	}
 }
 
-func loadHistory() []Message {
-	rows, err := db.Query("SELECT id, username, to_username, text, is_file, file_url, file_name, type, timestamp FROM messages ORDER BY timestamp ASC")
+func loadHistoryFromDB() []Message {
+	rows, err := db.Query("SELECT id, username, to_username, text, is_file, file_name, type, timestamp FROM messages ORDER BY timestamp ASC")
 	if err != nil {
 		log.Println("loadHistory error:", err)
-		return []Message{}
+		return nil
 	}
 	defer rows.Close()
 	var history []Message
 	for rows.Next() {
 		var m Message
 		var toPtr sql.NullString
-		err := rows.Scan(&m.ID, &m.Username, &toPtr, &m.Text, &m.IsFile, &m.FileUrl, &m.FileName, &m.Type, &m.Timestamp)
+		err := rows.Scan(&m.ID, &m.Username, &toPtr, &m.Text, &m.IsFile, &m.FileName, &m.Type, &m.Timestamp)
 		if err != nil {
 			log.Println("scan error:", err)
 			continue
@@ -86,38 +91,47 @@ func loadHistory() []Message {
 		if toPtr.Valid {
 			m.To = toPtr.String
 		}
+		if m.IsFile {
+			// Формируем URL для скачивания файла, который будет через отдельный хендлер
+			m.FileUrl = "/api/file/" + m.ID
+		}
 		history = append(history, m)
 	}
 	return history
 }
 
-func saveMessageToDB(m Message) {
-	_, err := db.Exec("INSERT INTO messages(id, username, to_username, text, is_file, file_url, file_name, type, timestamp) VALUES(?,?,?,?,?,?,?,?,?)",
-		m.ID, m.Username, m.To, m.Text, m.IsFile, m.FileUrl, m.FileName, m.Type, m.Timestamp)
-	if err != nil {
-		log.Println("saveMessage error:", err)
-	}
+func saveMessageToDB(m Message) error {
+	_, err := db.Exec(`
+        INSERT INTO messages(id, username, to_username, text, is_file, file_name, file_data, type, timestamp)
+        VALUES($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+		m.ID, m.Username, m.To, m.Text, m.IsFile, m.FileName, m.FileData, m.Type, m.Timestamp)
+	return err
 }
 
-func deleteMessageFromDB(id string) {
-	_, err := db.Exec("DELETE FROM messages WHERE id = ?", id)
+func deleteMessageFromDB(id string) error {
+	_, err := db.Exec("DELETE FROM messages WHERE id = $1", id)
+	return err
+}
+
+func getFileData(id string) ([]byte, string, error) {
+	var data []byte
+	var fileName string
+	err := db.QueryRow("SELECT file_data, file_name FROM messages WHERE id = $1", id).Scan(&data, &fileName)
 	if err != nil {
-		log.Println("deleteMessage error:", err)
+		return nil, "", err
 	}
+	return data, fileName, nil
 }
 
 func main() {
 	initDB()
 	defer db.Close()
 
-	// Загружаем историю из БД
-	history := loadHistory()
-	// Отправим историю новым клиентам
-	go handleMessages(history)
+	go handleMessages()
 
 	http.HandleFunc("/ws", wsHandler)
 	http.HandleFunc("/upload", uploadHandler)
-	http.HandleFunc("/download/", downloadHandler)
+	http.HandleFunc("/api/file/", fileHandler) // для скачивания по ID
 
 	staticDir := "dist"
 	http.Handle("/", http.FileServer(http.Dir(staticDir)))
@@ -138,21 +152,21 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	defer conn.Close()
 
-	var msg Message
-	err = conn.ReadJSON(&msg)
-	if err != nil || msg.Type != "hello" || msg.Username == "" {
+	var initMsg Message
+	err = conn.ReadJSON(&initMsg)
+	if err != nil || initMsg.Type != "hello" || initMsg.Username == "" {
 		conn.WriteJSON(Message{Type: "error", Text: "Invalid hello"})
 		return
 	}
 
-	client := &Client{conn: conn, username: msg.Username}
+	client := &Client{conn: conn, username: initMsg.Username}
 	mu.Lock()
 	clients[client] = true
 	mu.Unlock()
 	broadcastUserList()
 
-	// Отправляем историю из БД
-	history := loadHistory()
+	// Отправляем историю
+	history := loadHistoryFromDB()
 	for _, h := range history {
 		conn.WriteJSON(h)
 	}
@@ -178,11 +192,11 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 			incoming.Timestamp = time.Now().Unix()
 		}
 
-		// Сохраняем в БД, если это не служебное сообщение (не delete)
 		if incoming.Type != "delete" {
-			saveMessageToDB(incoming)
+			if err := saveMessageToDB(incoming); err != nil {
+				log.Println("Failed to save message to DB:", err)
+			}
 		}
-
 		broadcast <- incoming
 	}
 }
@@ -200,29 +214,24 @@ func broadcastUserList() {
 	}
 }
 
-func handleMessages(initialHistory []Message) {
-	// Сначала отправим сохранённые сообщения всем текущим клиентам? Они уже отправлены при подключении.
+func handleMessages() {
 	for {
 		msg := <-broadcast
 		if msg.Type == "delete" {
-			// Удаляем из БД, только если отправитель совпадает с автором сообщения
-			// Нужно проверить в БД, кто автор. Лучше при удалении передавать ID, а мы уже знаем автора из сообщения?
-			// При удалении мы получаем только ID. Поэтому запросим автора из БД.
+			// проверка авторства
 			var author string
-			err := db.QueryRow("SELECT username FROM messages WHERE id = ?", msg.ID).Scan(&author)
+			err := db.QueryRow("SELECT username FROM messages WHERE id = $1", msg.ID).Scan(&author)
 			if err == nil && author == msg.Username {
 				deleteMessageFromDB(msg.ID)
-				// Уведомляем всех об удалении
 				for client := range clients {
 					client.conn.WriteJSON(Message{Type: "delete", ID: msg.ID})
 				}
 			} else {
-				log.Println("Unauthorized delete attempt by", msg.Username, "for msg", msg.ID)
+				log.Println("Unauthorized delete attempt by", msg.Username)
 			}
 			continue
 		}
 
-		// Рассылаем сообщение всем, кому нужно
 		mu.Lock()
 		if msg.To == "" {
 			for client := range clients {
@@ -244,7 +253,11 @@ func uploadHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	r.ParseMultipartForm(10 << 20)
+	err := r.ParseMultipartForm(10 << 20) // 10 MB
+	if err != nil {
+		http.Error(w, "Failed to parse form", http.StatusBadRequest)
+		return
+	}
 	file, handler, err := r.FormFile("file")
 	if err != nil {
 		http.Error(w, "File error", http.StatusBadRequest)
@@ -252,21 +265,46 @@ func uploadHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	defer file.Close()
 
-	os.MkdirAll("uploads", os.ModePerm)
-	filePath := filepath.Join("uploads", handler.Filename)
-	dst, err := os.Create(filePath)
+	// Читаем файл в память
+	fileData, err := io.ReadAll(file)
 	if err != nil {
-		http.Error(w, "Server error", http.StatusInternalServerError)
+		http.Error(w, "Failed to read file", http.StatusInternalServerError)
 		return
 	}
-	defer dst.Close()
 
-	io.Copy(dst, file)
-	w.Write([]byte("/download/" + handler.Filename))
+	// Создаём сообщение-заглушку для файла (будет сохранено в БД)
+	fileMsg := Message{
+		ID:        uuid.New().String(),
+		Text:      handler.Filename,
+		IsFile:    true,
+		FileName:  handler.Filename,
+		FileData:  fileData,
+		Type:      "msg",
+		Timestamp: time.Now().Unix(),
+	}
+	// Сохраняем в БД
+	if err := saveMessageToDB(fileMsg); err != nil {
+		log.Println("Failed to save file message:", err)
+		http.Error(w, "DB error", http.StatusInternalServerError)
+		return
+	}
+
+	// Отправляем ссылку на файл обратно клиенту
+	w.Write([]byte("/api/file/" + fileMsg.ID))
 }
 
-func downloadHandler(w http.ResponseWriter, r *http.Request) {
-	filename := strings.TrimPrefix(r.URL.Path, "/download/")
-	filePath := filepath.Join("uploads", filename)
-	http.ServeFile(w, r, filePath)
+func fileHandler(w http.ResponseWriter, r *http.Request) {
+	id := strings.TrimPrefix(r.URL.Path, "/api/file/")
+	if id == "" {
+		http.Error(w, "Missing file ID", http.StatusBadRequest)
+		return
+	}
+	data, fileName, err := getFileData(id)
+	if err != nil {
+		http.Error(w, "File not found", http.StatusNotFound)
+		return
+	}
+	w.Header().Set("Content-Disposition", "attachment; filename="+fileName)
+	w.Header().Set("Content-Type", "application/octet-stream")
+	w.Write(data)
 }

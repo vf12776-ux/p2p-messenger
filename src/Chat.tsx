@@ -92,20 +92,19 @@ export default function Chat() {
   };
 
   const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-    const formData = new FormData();
-    formData.append('file', file);
-    try {
-      const response = await fetch('/upload', { method: 'POST', body: formData });
-      const downloadUrl = await response.text();
-      sendMessage(`Файл: ${file.name}`, true, downloadUrl, file.name);
-    } catch (err) {
-      console.error(err);
-      alert('Ошибка загрузки файла');
-    }
-  };
-
+  const file = e.target.files?.[0];
+  if (!file) return;
+  const formData = new FormData();
+  formData.append('file', file);
+  try {
+    const response = await fetch('/upload', { method: 'POST', body: formData });
+    const downloadUrl = await response.text(); // теперь это "/api/file/..."
+    sendMessage(`Файл: ${file.name}`, true, downloadUrl, file.name);
+  } catch (err) {
+    console.error(err);
+    alert('Ошибка загрузки файла');
+  }
+};
   if (!isJoined) {
     return (
       <div style={{ maxWidth: '400px', margin: '50px auto', textAlign: 'center' }}>
