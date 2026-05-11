@@ -26,7 +26,7 @@ export default function Chat() {
   const reconnectTimeoutRef = useRef<number>();
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const audioChunksRef = useRef<Blob[]>([]);
-  const recordingTimeoutRef = useRef<number>();
+  // ❌ НЕТ recordingTimeoutRef – он был удалён
 
   const connectWebSocket = () => {
     if (!isJoined) return;
@@ -142,7 +142,6 @@ export default function Chat() {
     e.target.value = '';
   };
 
-  // Голосовое сообщение
   const startRecording = async () => {
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
@@ -167,7 +166,6 @@ export default function Chat() {
           console.error(err);
           alert('Ошибка отправки голосового сообщения');
         }
-        // Останавливаем все дорожки микрофона
         stream.getTracks().forEach(track => track.stop());
         setIsRecording(false);
       };
