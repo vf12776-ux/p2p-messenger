@@ -39,7 +39,6 @@ export default function Chat() {
   const pendingFilesRef = useRef<PendingFile[]>([]);
   const retryIntervalRef = useRef<number>();
 
-  // ----- Уведомления -----
   const showToast = (message: string, type: 'error' | 'info' = 'error') => {
     setToast({ message, type });
   };
@@ -51,7 +50,6 @@ export default function Chat() {
     }
   }, [toast]);
 
-  // ----- WebSocket (без изменений) -----
   const connectWebSocket = () => {
     if (!isJoined) return;
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -114,8 +112,8 @@ export default function Chat() {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages]);
 
-  // ----- Очередь файлов с прогрессом -----
-  const uploadFileWithProgress = (formData: FormData, tempId: string, fileName: string): Promise<void> => {
+  // ----- Файлы с прогрессом (исправлено: убрали неиспользуемый fileName) -----
+  const uploadFileWithProgress = (formData: FormData, tempId: string): Promise<void> => {
     return new Promise((resolve, reject) => {
       const xhr = new XMLHttpRequest();
       xhr.open('POST', '/upload');
@@ -141,7 +139,7 @@ export default function Chat() {
 
   const uploadFileWithRetry = async (formData: FormData, fileName: string, tempId: string, retries: number) => {
     try {
-      await uploadFileWithProgress(formData, tempId, fileName);
+      await uploadFileWithProgress(formData, tempId);
       pendingFilesRef.current = pendingFilesRef.current.filter(f => f.id !== tempId);
       setMessages(prev =>
         prev.map(msg =>
@@ -195,7 +193,6 @@ export default function Chat() {
     await uploadFileWithRetry(formData, file.name, tempId, 0);
   };
 
-  // ----- Текстовые сообщения -----
   const sendMessage = (text: string, isFile = false, fileUrl = '', fileName = '') => {
     const msg: Message = {
       id: Date.now().toString() + Math.random(),
@@ -239,7 +236,6 @@ export default function Chat() {
     e.target.value = '';
   };
 
-  // ----- Голосовые -----
   const startRecording = async () => {
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
@@ -285,7 +281,6 @@ export default function Chat() {
     return ext === 'webm' || ext === 'mp3' || ext === 'wav' || ext === 'ogg';
   };
 
-  // ----- Периодический ретрай файлов -----
   useEffect(() => {
     if (isJoined) {
       retryIntervalRef.current = window.setInterval(() => {
@@ -305,7 +300,6 @@ export default function Chat() {
     return () => window.removeEventListener('online', handleOnline);
   }, []);
 
-  // ----- Рендер входа -----
   if (!isJoined) {
     return (
       <div style={{ maxWidth: '400px', margin: '50px auto', textAlign: 'center' }}>
@@ -322,7 +316,6 @@ export default function Chat() {
     );
   }
 
-  // ----- Основной рендер чата -----
   return (
     <div style={{ display: 'flex', height: '100vh', flexDirection: 'column', maxWidth: '1200px', margin: '0 auto' }}>
       <style>{`
