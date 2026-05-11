@@ -12,6 +12,13 @@ interface Message {
   status?: 'pending' | 'sent';
 }
 
+interface PendingFile {
+  id: string;
+  formData: FormData;
+  fileName: string;
+  retryCount: number;
+}
+
 export default function Chat() {
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState('');
@@ -26,8 +33,10 @@ export default function Chat() {
   const reconnectTimeoutRef = useRef<number>();
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const audioChunksRef = useRef<Blob[]>([]);
-  // ❌ НЕТ recordingTimeoutRef – он был удалён
+  const pendingFilesRef = useRef<PendingFile[]>([]);
+  const retryIntervalRef = useRef<number>();
 
+  // ----- WebSocket -----
   const connectWebSocket = () => {
     if (!isJoined) return;
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -90,6 +99,65 @@ export default function Chat() {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages]);
 
+  // ----- Очередь файлов с повторными попытками -----
+  const retryPendingFiles = async () => {
+    if (pendingFilesRef.current.length === 0) return;
+    console.log(`Retrying ${pendingFilesRef.current.length} pending files...`);
+    const toRetry = [...pendingFilesRef.current];
+    pendingFilesRef.current = [];
+    for (const fileItem of toRetry) {
+      await uploadFileWithRetry(fileItem.formData, fileItem.fileName, fileItem.id, fileItem.retryCount);
+    }
+  };
+
+  const uploadFileWithRetry = async (formData: FormData, fileName: string, tempId: string, retries: number) => {
+    try {
+      const response = await fetch('/upload', { method: 'POST', body: formData });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      pendingFilesRef.current = pendingFilesRef.current.filter(f => f.id !== tempId);
+      setMessages(prev =>
+        prev.map(msg =>
+          msg.id === tempId && msg.username === username ? { ...msg, status: 'sent' } : msg
+        )
+      );
+    } catch (err) {
+      if (retries < 5) {
+        pendingFilesRef.current.push({ id: tempId, formData, fileName, retryCount: retries + 1 });
+        console.log(`File upload failed, retry ${retries + 1}/5: ${fileName}`);
+      } else {
+        console.error(`File upload failed after 5 retries: ${fileName}`);
+        setMessages(prev =>
+          prev.map(msg =>
+            msg.id === tempId ? { ...msg, text: `❌ ${msg.text} (ошибка отправки)` } : msg
+          )
+        );
+      }
+    }
+  };
+
+  const sendFile = async (file: File, type: 'file' | 'voice' = 'file') => {
+    const tempId = Date.now().toString() + Math.random();
+    const displayName = type === 'voice' ? '🎤 Голосовое сообщение' : file.name;
+    const tmpMsg: Message = {
+      id: tempId,
+      username,
+      text: displayName,
+      isFile: true,
+      fileName: file.name,
+      fileUrl: '',
+      timestamp: Date.now(),
+      status: 'pending',
+    };
+    setMessages(prev => [...prev, tmpMsg]);
+
+    const formData = new FormData();
+    formData.append('file', file);
+    formData.append('username', username);
+    pendingFilesRef.current.push({ id: tempId, formData, fileName: file.name, retryCount: 0 });
+    await uploadFileWithRetry(formData, file.name, tempId, 0);
+  };
+
+  // ----- Текстовые сообщения -----
   const sendMessage = (text: string, isFile = false, fileUrl = '', fileName = '') => {
     const msg: Message = {
       id: Date.now().toString() + Math.random(),
@@ -110,6 +178,7 @@ export default function Chat() {
     }
   };
 
+  // ----- Удаление / очистка -----
   const deleteMessage = (id: string) => {
     if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return;
     wsRef.current.send(JSON.stringify({ type: 'delete', id }));
@@ -126,22 +195,15 @@ export default function Chat() {
     setInput('');
   };
 
+  // ----- Файлы (обычные) -----
   const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
-    const formData = new FormData();
-    formData.append('file', file);
-    formData.append('username', username);
-    try {
-      const response = await fetch('/upload', { method: 'POST', body: formData });
-      if (!response.ok) throw new Error();
-    } catch (err) {
-      console.error(err);
-      alert('Ошибка загрузки файла');
-    }
+    await sendFile(file, 'file');
     e.target.value = '';
   };
 
+  // ----- Голосовые сообщения -----
   const startRecording = async () => {
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
@@ -150,22 +212,13 @@ export default function Chat() {
       audioChunksRef.current = [];
 
       mediaRecorder.ondataavailable = (event) => {
-        if (event.data.size > 0) {
-          audioChunksRef.current.push(event.data);
-        }
+        if (event.data.size > 0) audioChunksRef.current.push(event.data);
       };
 
       mediaRecorder.onstop = async () => {
         const audioBlob = new Blob(audioChunksRef.current, { type: 'audio/webm' });
-        const formData = new FormData();
-        formData.append('file', audioBlob, `voice_${Date.now()}.webm`);
-        formData.append('username', username);
-        try {
-          await fetch('/upload', { method: 'POST', body: formData });
-        } catch (err) {
-          console.error(err);
-          alert('Ошибка отправки голосового сообщения');
-        }
+        const audioFile = new File([audioBlob], `voice_${Date.now()}.webm`, { type: 'audio/webm' });
+        await sendFile(audioFile, 'voice');
         stream.getTracks().forEach(track => track.stop());
         setIsRecording(false);
       };
@@ -184,6 +237,7 @@ export default function Chat() {
     }
   };
 
+  // ----- Вспомогательные функции для отображения -----
   const isImageFile = (fileName?: string): boolean => {
     if (!fileName) return false;
     const ext = fileName.split('.').pop()?.toLowerCase();
@@ -196,6 +250,28 @@ export default function Chat() {
     return ext === 'webm' || ext === 'mp3' || ext === 'wav' || ext === 'ogg';
   };
 
+  // ----- Эффекты для периодической отправки файлов при плохой сети -----
+  useEffect(() => {
+    if (isJoined) {
+      retryIntervalRef.current = window.setInterval(() => {
+        if (navigator.onLine) retryPendingFiles();
+      }, 30000);
+    }
+    return () => {
+      if (retryIntervalRef.current) clearInterval(retryIntervalRef.current);
+    };
+  }, [isJoined]);
+
+  useEffect(() => {
+    const handleOnline = () => {
+      console.log('Network online, retrying files...');
+      retryPendingFiles();
+    };
+    window.addEventListener('online', handleOnline);
+    return () => window.removeEventListener('online', handleOnline);
+  }, []);
+
+  // ----- Интерфейс входа в чат -----
   if (!isJoined) {
     return (
       <div style={{ maxWidth: '400px', margin: '50px auto', textAlign: 'center' }}>
@@ -212,6 +288,7 @@ export default function Chat() {
     );
   }
 
+  // ----- Основной рендер чата -----
   return (
     <div style={{ display: 'flex', height: '100vh', flexDirection: 'column', maxWidth: '1200px', margin: '0 auto' }}>
       <div style={{ padding: '10px', background: '#f0f0f0', display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '10px', flexWrap: 'wrap' }}>
@@ -248,9 +325,7 @@ export default function Chat() {
                 isImageFile(msg.fileName) ? (
                   <img src={msg.fileUrl} alt={msg.fileName} style={{ maxWidth: '200px', maxHeight: '200px', borderRadius: '8px' }} />
                 ) : isAudioFile(msg.fileName) ? (
-                  <audio controls src={msg.fileUrl} style={{ minWidth: '200px' }}>
-                    Ваш браузер не поддерживает аудио.
-                  </audio>
+                  <audio controls src={msg.fileUrl} style={{ minWidth: '200px' }} />
                 ) : (
                   <a href={msg.fileUrl} target="_blank" rel="noopener noreferrer">{msg.fileName || msg.text}</a>
                 )
