@@ -270,7 +270,10 @@ func fileHandler(w http.ResponseWriter, r *http.Request) {
 		ctype = "image/png"
 	} else if ext == ".gif" {
 		ctype = "image/gif"
+	} else if ext == ".webm" {
+		ctype = "audio/webm"
 	}
+
 	w.Header().Set("Content-Type", ctype)
 	w.Write(data)
 }

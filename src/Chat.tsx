@@ -18,11 +18,15 @@ export default function Chat() {
   const [username, setUsername] = useState('');
   const [isConnected, setIsConnected] = useState(false);
   const [isJoined, setIsJoined] = useState(false);
+  const [isRecording, setIsRecording] = useState(false);
   const wsRef = useRef<WebSocket | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const pendingMessagesRef = useRef<Message[]>([]);
   const reconnectAttemptsRef = useRef(0);
   const reconnectTimeoutRef = useRef<number>();
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const audioChunksRef = useRef<Blob[]>([]);
+  const recordingTimeoutRef = useRef<number>();
 
   const connectWebSocket = () => {
     if (!isJoined) return;
@@ -49,7 +53,6 @@ export default function Chat() {
         setMessages(prev => {
           const exists = prev.some(m => m.id === data.id);
           if (exists) return prev;
-          // Если это сообщение от текущего пользователя и оно из истории – ставим sent
           const newMsg = { ...data, status: data.username === username ? 'sent' : undefined };
           return [...prev, newMsg];
         });
@@ -132,8 +135,6 @@ export default function Chat() {
     try {
       const response = await fetch('/upload', { method: 'POST', body: formData });
       if (!response.ok) throw new Error();
-      // Сервер сам разошлёт сообщение через broadcast, нам не нужно отправлять дополнительно
-      // Просто очистим input
     } catch (err) {
       console.error(err);
       alert('Ошибка загрузки файла');
@@ -141,10 +142,60 @@ export default function Chat() {
     e.target.value = '';
   };
 
+  // Голосовое сообщение
+  const startRecording = async () => {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const mediaRecorder = new MediaRecorder(stream);
+      mediaRecorderRef.current = mediaRecorder;
+      audioChunksRef.current = [];
+
+      mediaRecorder.ondataavailable = (event) => {
+        if (event.data.size > 0) {
+          audioChunksRef.current.push(event.data);
+        }
+      };
+
+      mediaRecorder.onstop = async () => {
+        const audioBlob = new Blob(audioChunksRef.current, { type: 'audio/webm' });
+        const formData = new FormData();
+        formData.append('file', audioBlob, `voice_${Date.now()}.webm`);
+        formData.append('username', username);
+        try {
+          await fetch('/upload', { method: 'POST', body: formData });
+        } catch (err) {
+          console.error(err);
+          alert('Ошибка отправки голосового сообщения');
+        }
+        // Останавливаем все дорожки микрофона
+        stream.getTracks().forEach(track => track.stop());
+        setIsRecording(false);
+      };
+
+      mediaRecorder.start();
+      setIsRecording(true);
+    } catch (err) {
+      console.error(err);
+      alert('Не удалось получить доступ к микрофону');
+    }
+  };
+
+  const stopRecording = () => {
+    if (mediaRecorderRef.current && isRecording) {
+      mediaRecorderRef.current.stop();
+    }
+  };
+
   const isImageFile = (fileName?: string): boolean => {
     if (!fileName) return false;
     const ext = fileName.split('.').pop()?.toLowerCase();
     return ext === 'jpg' || ext === 'jpeg' || ext === 'png' || ext === 'gif' || ext === 'webp';
+  };
+
+  const isAudioFile = (fileName?: string): boolean => {
+    if (!fileName) return false;
+    const ext = fileName.split('.').pop()?.toLowerCase();
+    return ext === 'webm' || ext === 'mp3' || ext === 'wav' || ext === 'ogg';
   };
 
   if (!isJoined) {
@@ -198,6 +249,10 @@ export default function Chat() {
               {msg.isFile ? (
                 isImageFile(msg.fileName) ? (
                   <img src={msg.fileUrl} alt={msg.fileName} style={{ maxWidth: '200px', maxHeight: '200px', borderRadius: '8px' }} />
+                ) : isAudioFile(msg.fileName) ? (
+                  <audio controls src={msg.fileUrl} style={{ minWidth: '200px' }}>
+                    Ваш браузер не поддерживает аудио.
+                  </audio>
                 ) : (
                   <a href={msg.fileUrl} target="_blank" rel="noopener noreferrer">{msg.fileName || msg.text}</a>
                 )
@@ -235,6 +290,23 @@ export default function Chat() {
           📎
           <input type="file" onChange={handleFileUpload} style={{ display: 'none' }} />
         </label>
+        <button
+          onMouseDown={startRecording}
+          onMouseUp={stopRecording}
+          onTouchStart={startRecording}
+          onTouchEnd={stopRecording}
+          style={{
+            background: isRecording ? '#dc3545' : '#ff9800',
+            padding: '10px 15px',
+            borderRadius: '20px',
+            border: 'none',
+            color: 'white',
+            cursor: 'pointer',
+            transition: 'background 0.2s'
+          }}
+        >
+          {isRecording ? '🔴 Запись...' : '🎤'}
+        </button>
       </div>
     </div>
   );
