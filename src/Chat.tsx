@@ -18,6 +18,35 @@ interface PendingFile {
   fileName: string;
   retryCount: number;
 }
+// Компонент-подсказка для установки на iOS
+const IOSInstallPrompt = ({ onClose }: { onClose: () => void }) => {
+  const [visible, setVisible] = useState(true);
+  if (!visible) return null;
+  return (
+    <div style={{
+      position: 'fixed',
+      bottom: '80px',
+      left: '20px',
+      right: '20px',
+      background: '#1c1c1e',
+      color: 'white',
+      padding: '14px',
+      borderRadius: '16px',
+      zIndex: 2000,
+      boxShadow: '0 4px 12px rgba(0,0,0,0.3)',
+      display: 'flex',
+      flexDirection: 'column',
+      alignItems: 'center',
+      gap: '10px',
+      fontSize: '14px',
+      fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif'
+    }}>
+      <div style={{ fontWeight: 'bold' }}>📱 Установите приложение</div>
+      <div style={{ textAlign: 'center' }}>Нажмите «Поделиться» → «На экран „Домой“»</div>
+      <button onClick={() => { setVisible(false); onClose(); }} style={{ background: '#007aff', border: 'none', color: 'white', padding: '6px 20px', borderRadius: '20px', fontSize: '14px', cursor: 'pointer' }}>Понятно</button>
+    </div>
+  );
+};
 
 export default function Chat() {
   const [messages, setMessages] = useState<Message[]>([]);
@@ -26,6 +55,7 @@ export default function Chat() {
   const [isConnected, setIsConnected] = useState(false);
   const [isJoined, setIsJoined] = useState(false);
   const [isRecording, setIsRecording] = useState(false);
+  const [showIOSPrompt, setShowIOSPrompt] = useState(false);
   const wsRef = useRef<WebSocket | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const pendingMessagesRef = useRef<Message[]>([]);
@@ -98,6 +128,18 @@ export default function Chat() {
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages]);
+  useEffect(() => {
+  const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) && !(window as any).MSStream;
+  const isStandalone = window.matchMedia('(display-mode: standalone)').matches;
+  if (isIOS && !isStandalone && !localStorage.getItem('iosPromptClosed')) {
+    setShowIOSPrompt(true);
+  }
+}, []);
+
+const closeIOSPrompt = () => {
+  setShowIOSPrompt(false);
+  localStorage.setItem('iosPromptClosed', 'true');
+};
 
   // ----- Очередь файлов с повторными попытками (без прогресс-бара) -----
   const uploadFileWithRetry = async (formData: FormData, fileName: string, tempId: string, retries: number) => {
@@ -371,6 +413,7 @@ export default function Chat() {
         >
           {isRecording ? '🔴 Запись...' : '🎤'}
         </button>
+        {showIOSPrompt && <IOSInstallPrompt onClose={closeIOSPrompt} />}
       </div>
     </div>
   );
