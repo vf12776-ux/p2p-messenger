@@ -103,6 +103,10 @@ func main() {
 	http.HandleFunc("/ws", wsHandler)
 	http.HandleFunc("/upload", uploadHandler)
 	http.HandleFunc("/api/file/", fileHandler)
+	http.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("OK"))
+	})
 
 	staticDir := "dist"
 	http.Handle("/", http.FileServer(http.Dir(staticDir)))
