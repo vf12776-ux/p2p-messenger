@@ -50,15 +50,9 @@ func initDB() {
 	var err error
 	db, err = sql.Open("postgres", connStr)
 	if err != nil {
-		log.Fatalf("sql.Open error: %v", err)
+		log.Fatal(err)
 	}
-	if err = db.Ping(); err != nil {
-		log.Fatalf("Ping error: %v", err)
-	}
-	log.Println("Database connected")
-
-	// Создаём таблицу
-	_, err = db.Exec(`CREATE TABLE IF NOT EXISTS messages (
+	db.Exec(`CREATE TABLE IF NOT EXISTS messages (
 		id TEXT PRIMARY KEY,
 		username TEXT,
 		text TEXT,
@@ -69,60 +63,33 @@ func initDB() {
 		type TEXT,
 		timestamp BIGINT
 	)`)
-	if err != nil {
-		log.Printf("CREATE TABLE error: %v", err)
-	} else {
-		log.Println("Table messages ready")
-	}
-
-	// Добавляем колонку room, если её нет
-	_, err = db.Exec(`ALTER TABLE messages ADD COLUMN IF NOT EXISTS room TEXT DEFAULT 'public'`)
-	if err != nil {
-		log.Printf("ALTER TABLE error: %v", err)
-	} else {
-		log.Println("Room column ready")
-	}
+	db.Exec(`ALTER TABLE messages ADD COLUMN IF NOT EXISTS room TEXT DEFAULT 'public'`)
 }
 
 func saveMessageToDB(m Message, fileData []byte) error {
-	log.Printf("SAVE: id=%s room=%s text=%s", m.ID, m.Room, m.Text)
 	_, err := db.Exec(
 		`INSERT INTO messages(id, username, text, room, is_file, file_name, file_data, type, timestamp)
 		VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
-		m.ID, m.Username, m.Text, m.Room, m.IsFile, m.FileName, fileData, m.Type, m.Timestamp,
-	)
-	if err != nil {
-		log.Printf("INSERT error: %v", err)
-	} else {
-		log.Printf("INSERT success: %s", m.ID)
-	}
+		m.ID, m.Username, m.Text, m.Room, m.IsFile, m.FileName, fileData, m.Type, m.Timestamp)
 	return err
 }
 
 func loadHistory(room string) []Message {
-	log.Printf("Loading history for room %s", room)
-	rows, err := db.Query(`
-		SELECT id, username, text, is_file, file_name, type, timestamp
-		FROM messages WHERE room = $1 ORDER BY timestamp ASC`, room)
+	rows, err := db.Query(`SELECT id, username, text, is_file, file_name, type, timestamp FROM messages WHERE room=$1 ORDER BY timestamp ASC`, room)
 	if err != nil {
-		log.Printf("Query error: %v", err)
 		return nil
 	}
 	defer rows.Close()
 	var msgs []Message
 	for rows.Next() {
 		var m Message
-		if err := rows.Scan(&m.ID, &m.Username, &m.Text, &m.IsFile, &m.FileName, &m.Type, &m.Timestamp); err != nil {
-			log.Printf("Scan error: %v", err)
-			continue
-		}
+		rows.Scan(&m.ID, &m.Username, &m.Text, &m.IsFile, &m.FileName, &m.Type, &m.Timestamp)
 		if m.IsFile {
 			m.FileUrl = "/api/file/" + m.ID
 		}
 		m.Room = room
 		msgs = append(msgs, m)
 	}
-	log.Printf("Loaded %d messages for room %s", len(msgs), room)
 	return msgs
 }
 
@@ -155,7 +122,6 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 	if err := conn.ReadJSON(&hello); err != nil || hello.Type != "hello" || hello.Username == "" {
 		return
 	}
-	log.Printf("User connected: %s", hello.Username)
 
 	client := &Client{conn: conn, username: hello.Username, room: "public"}
 	mu.Lock()
@@ -176,7 +142,6 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 			mu.Lock()
 			delete(rooms[client.room], client)
 			mu.Unlock()
-			log.Printf("User disconnected: %s", client.username)
 			break
 		}
 		msg.Username = client.username
@@ -194,10 +159,7 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 				room = "public"
 			}
 			msg.Room = room
-			log.Printf("Received msg: %s", msg.ID)
-			if err := saveMessageToDB(msg, nil); err != nil {
-				log.Printf("Failed to save: %v", err)
-			}
+			saveMessageToDB(msg, nil)
 			conn.WriteJSON(Message{Type: "ack", ID: msg.ID})
 			mu.Lock()
 			for c := range rooms[room] {
@@ -210,7 +172,6 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 			if newRoom == "" {
 				newRoom = "public"
 			}
-			log.Printf("User %s joins room %s", client.username, newRoom)
 			mu.Lock()
 			delete(rooms[client.room], client)
 			if rooms[newRoom] == nil {
@@ -285,10 +246,7 @@ func uploadHandler(w http.ResponseWriter, r *http.Request) {
 		Type:      "msg",
 		Timestamp: time.Now().Unix(),
 	}
-	if err := saveMessageToDB(msg, data); err != nil {
-		http.Error(w, "DB error", http.StatusInternalServerError)
-		return
-	}
+	saveMessageToDB(msg, data)
 	msg.FileUrl = "/api/file/" + msg.ID
 	mu.Lock()
 	for c := range rooms[room] {
