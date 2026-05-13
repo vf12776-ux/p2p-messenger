@@ -52,6 +52,7 @@ func initDB() {
 	if err != nil {
 		log.Fatal(err)
 	}
+	// Добавляем колонку room, если её нет
 	db.Exec(`CREATE TABLE IF NOT EXISTS messages (
 		id TEXT PRIMARY KEY,
 		username TEXT,
@@ -66,17 +67,18 @@ func initDB() {
 	db.Exec(`ALTER TABLE messages ADD COLUMN IF NOT EXISTS room TEXT DEFAULT 'public'`)
 }
 
-func saveMessage(m Message, fileData []byte) error {
-	_, err := db.Exec(
-		`INSERT INTO messages(id, username, text, room, is_file, file_name, file_data, type, timestamp)
+func saveMessageToDB(m Message, fileData []byte) error {
+	_, err := db.Exec(`
+		INSERT INTO messages(id, username, text, room, is_file, file_name, file_data, type, timestamp)
 		VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
-		m.ID, m.Username, m.Text, m.Room, m.IsFile, m.FileName, fileData, m.Type, m.Timestamp,
-	)
+		m.ID, m.Username, m.Text, m.Room, m.IsFile, m.FileName, fileData, m.Type, m.Timestamp)
 	return err
 }
 
 func loadHistory(room string) []Message {
-	rows, err := db.Query(`SELECT id, username, text, is_file, file_name, type, timestamp FROM messages WHERE room=$1 ORDER BY timestamp ASC`, room)
+	rows, err := db.Query(`
+		SELECT id, username, text, is_file, file_name, type, timestamp
+		FROM messages WHERE room = $1 ORDER BY timestamp ASC`, room)
 	if err != nil {
 		return nil
 	}
@@ -102,8 +104,8 @@ func main() {
 	http.HandleFunc("/upload", uploadHandler)
 	http.HandleFunc("/api/file/", fileHandler)
 	http.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) { w.Write([]byte("OK")) })
-	http.Handle("/", http.FileServer(http.Dir("dist")))
 
+	http.Handle("/", http.FileServer(http.Dir("dist")))
 	port := os.Getenv("PORT")
 	if port == "" {
 		port = "8080"
@@ -132,6 +134,7 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 	rooms["public"][client] = true
 	mu.Unlock()
 
+	// Отправляем историю общего чата
 	for _, msg := range loadHistory("public") {
 		conn.WriteJSON(msg)
 	}
@@ -160,8 +163,13 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 				room = "public"
 			}
 			msg.Room = room
-			saveMessage(msg, nil)
+			// Сохраняем в БД (работает как в zip)
+			if err := saveMessageToDB(msg, nil); err != nil {
+				log.Printf("DB error: %v", err)
+			}
+			// Подтверждение отправителю
 			conn.WriteJSON(Message{Type: "ack", ID: msg.ID})
+			// Рассылка всем в этой комнате
 			mu.Lock()
 			for c := range rooms[room] {
 				c.conn.WriteJSON(msg)
@@ -181,6 +189,7 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 			rooms[newRoom][client] = true
 			client.room = newRoom
 			mu.Unlock()
+			// Отправляем историю новой комнаты
 			for _, m := range loadHistory(newRoom) {
 				conn.WriteJSON(m)
 			}
@@ -247,8 +256,13 @@ func uploadHandler(w http.ResponseWriter, r *http.Request) {
 		Type:      "msg",
 		Timestamp: time.Now().Unix(),
 	}
-	saveMessage(msg, data)
+	// Сохраняем файл в БД
+	if err := saveMessageToDB(msg, data); err != nil {
+		http.Error(w, "DB error", http.StatusInternalServerError)
+		return
+	}
 	msg.FileUrl = "/api/file/" + msg.ID
+	// Рассылаем всем в комнате
 	mu.Lock()
 	for c := range rooms[room] {
 		c.conn.WriteJSON(msg)
@@ -268,14 +282,13 @@ func fileHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	ext := filepath.Ext(fileName)
 	ctype := "application/octet-stream"
-	switch ext {
-	case ".jpg", ".jpeg":
+	if ext == ".jpg" || ext == ".jpeg" {
 		ctype = "image/jpeg"
-	case ".png":
+	} else if ext == ".png" {
 		ctype = "image/png"
-	case ".gif":
+	} else if ext == ".gif" {
 		ctype = "image/gif"
-	case ".webm":
+	} else if ext == ".webm" {
 		ctype = "audio/webm"
 	}
 	w.Header().Set("Content-Type", ctype)
