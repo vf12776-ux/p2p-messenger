@@ -63,7 +63,6 @@ func initDB() {
 		type TEXT,
 		timestamp BIGINT
 	)`)
-	// Гарантированно добавляем колонку room (если её нет)
 	if _, err := db.Exec(`ALTER TABLE messages ADD COLUMN IF NOT EXISTS room TEXT DEFAULT 'public'`); err != nil {
 		log.Println("Warning: adding room column:", err)
 	} else {
@@ -72,14 +71,10 @@ func initDB() {
 }
 
 func saveMessage(m Message, fileData []byte) error {
-	log.Printf("Saving: id=%s room=%s user=%s text=%s", m.ID, m.Room, m.Username, m.Text)
 	_, err := db.Exec(
 		`INSERT INTO messages(id, username, text, room, is_file, file_name, file_data, type, timestamp)
-        VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
+		VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
 		m.ID, m.Username, m.Text, m.Room, m.IsFile, m.FileName, fileData, m.Type, m.Timestamp)
-	if err != nil {
-		log.Printf("DB exec error: %v", err)
-	}
 	return err
 }
 
@@ -169,11 +164,7 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 				room = "public"
 			}
 			msg.Room = room
-			if err := saveMessage(msg, nil); err != nil {
-				log.Printf("ERROR saveMessage: %v", err)
-			} else {
-				log.Printf("Saved msg %s in room %s", msg.ID, room)
-			}
+			saveMessage(msg, nil)
 			conn.WriteJSON(Message{Type: "ack", ID: msg.ID})
 			mu.Lock()
 			for c := range rooms[room] {
