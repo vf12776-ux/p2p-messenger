@@ -51,9 +51,11 @@ const Chat: React.FC<{ username: string }> = ({ username }) => {
             }
             else if (data.type === 'msg' || data.type === 'image' || data.type === 'file' || (data.id && data.username)) {
                 const msg = { ...data, type: data.type || 'msg', status: data.status || 'sent' };
-                if (msg.room === currentRoom) {
-                    setMessages(prev => [...prev, msg]);
-                } else if (msg.room) {
+                setMessages(prev => {
+                    if (prev.some(m => m.id === msg.id)) return prev;
+                    return [...prev, msg];
+                });
+                if (msg.room && msg.room !== currentRoom) {
                     setUnread(prev => ({ ...prev, [msg.room]: (prev[msg.room] || 0) + 1 }));
                 }
             }
@@ -96,7 +98,6 @@ const Chat: React.FC<{ username: string }> = ({ username }) => {
             timestamp: Date.now(),
             status: 'pending',
         };
-        setMessages(prev => [...prev, msg]);
         sendWsMessage(msg);
         setInputText('');
     };
