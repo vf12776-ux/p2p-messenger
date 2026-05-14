@@ -22,7 +22,6 @@ type Message struct {
 	ID        string `json:"id"`
 	Username  string `json:"username"`
 	Text      string `json:"text"`
-	Room      string `json:"room,omitempty"` // ДОБАВЛЕНО
 	IsFile    bool   `json:"isFile,omitempty"`
 	FileUrl   string `json:"fileUrl,omitempty"`
 	FileName  string `json:"fileName,omitempty"`
@@ -33,13 +32,13 @@ type Message struct {
 type Client struct {
 	conn     *websocket.Conn
 	username string
-	room     string // ДОБАВЛЕНО
 }
 
 var (
-	rooms = make(map[string]map[*Client]bool) // ЗАМЕНА clients -> rooms
-	mu    sync.Mutex
-	db    *sql.DB
+	clients   = make(map[*Client]bool)
+	mu        sync.Mutex
+	broadcast = make(chan Message)
+	db        *sql.DB
 )
 
 func initDB() {
@@ -52,35 +51,28 @@ func initDB() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	// Добавлено поле room
 	db.Exec(`CREATE TABLE IF NOT EXISTS messages (
 		id TEXT PRIMARY KEY,
 		username TEXT,
 		text TEXT,
-		room TEXT DEFAULT 'public',
 		is_file BOOLEAN,
 		file_name TEXT,
 		file_data BYTEA,
 		type TEXT,
 		timestamp BIGINT
 	)`)
-	// Миграция для старых БД
-	db.Exec(`ALTER TABLE messages ADD COLUMN IF NOT EXISTS room TEXT DEFAULT 'public'`)
 }
 
 func saveMessageToDB(m Message, fileData []byte) error {
-	// Добавлено поле room в INSERT
 	_, err := db.Exec(`
-		INSERT INTO messages(id, username, text, room, is_file, file_name, file_data, type, timestamp)
-		VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
-		m.ID, m.Username, m.Text, m.Room, m.IsFile, m.FileName, fileData, m.Type, m.Timestamp)
+		INSERT INTO messages(id, username, text, is_file, file_name, file_data, type, timestamp)
+		VALUES($1,$2,$3,$4,$5,$6,$7,$8)`,
+		m.ID, m.Username, m.Text, m.IsFile, m.FileName, fileData, m.Type, m.Timestamp)
 	return err
 }
 
-func loadHistory(room string) []Message { // добавлен параметр room
-	rows, err := db.Query(`
-		SELECT id, username, text, is_file, file_name, type, timestamp
-		FROM messages WHERE room = $1 ORDER BY timestamp ASC`, room)
+func loadHistory() []Message {
+	rows, err := db.Query(`SELECT id, username, text, is_file, file_name, type, timestamp FROM messages ORDER BY timestamp ASC`)
 	if err != nil {
 		return nil
 	}
@@ -92,7 +84,6 @@ func loadHistory(room string) []Message { // добавлен параметр r
 		if m.IsFile {
 			m.FileUrl = "/api/file/" + m.ID
 		}
-		m.Room = room
 		msgs = append(msgs, m)
 	}
 	return msgs
@@ -101,13 +92,14 @@ func loadHistory(room string) []Message { // добавлен параметр r
 func main() {
 	initDB()
 	defer db.Close()
+	go handleMessages()
 
 	http.HandleFunc("/ws", wsHandler)
 	http.HandleFunc("/upload", uploadHandler)
 	http.HandleFunc("/api/file/", fileHandler)
 	http.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) { w.Write([]byte("OK")) })
-	http.Handle("/", http.FileServer(http.Dir("dist")))
 
+	http.Handle("/", http.FileServer(http.Dir("dist")))
 	port := os.Getenv("PORT")
 	if port == "" {
 		port = "8080"
@@ -128,16 +120,12 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	client := &Client{conn: conn, username: initMsg.Username, room: "public"}
+	client := &Client{conn: conn, username: initMsg.Username}
 	mu.Lock()
-	if rooms["public"] == nil {
-		rooms["public"] = make(map[*Client]bool)
-	}
-	rooms["public"][client] = true
+	clients[client] = true
 	mu.Unlock()
 
-	// загружаем историю только для public
-	for _, msg := range loadHistory("public") {
+	for _, msg := range loadHistory() {
 		conn.WriteJSON(msg)
 	}
 
@@ -146,7 +134,7 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 		err := conn.ReadJSON(&incoming)
 		if err != nil {
 			mu.Lock()
-			delete(rooms[client.room], client)
+			delete(clients, client)
 			mu.Unlock()
 			break
 		}
@@ -158,64 +146,41 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 			incoming.Timestamp = time.Now().Unix()
 		}
 
-		switch incoming.Type {
-		case "msg":
-			room := incoming.Room
-			if room == "" {
-				room = client.room // используем комнату клиента, если не передана
-			}
-			incoming.Room = room
+		if incoming.Type == "msg" {
 			saveMessageToDB(incoming, nil)
 			conn.WriteJSON(Message{Type: "ack", ID: incoming.ID})
-			mu.Lock()
-			if croom, ok := rooms[room]; ok {
-				for c := range croom {
-					c.conn.WriteJSON(incoming)
-				}
-			}
-			mu.Unlock()
-
-		case "join":
-			newRoom := incoming.Room
-			if newRoom == "" {
-				newRoom = "public"
-			}
-			mu.Lock()
-			delete(rooms[client.room], client)
-			if rooms[newRoom] == nil {
-				rooms[newRoom] = make(map[*Client]bool)
-			}
-			rooms[newRoom][client] = true
-			client.room = newRoom
-			mu.Unlock()
-			// Отправляем историю новой комнаты
-			for _, m := range loadHistory(newRoom) {
-				conn.WriteJSON(m)
-			}
-			conn.WriteJSON(Message{Type: "joined", Room: newRoom})
-
-		case "delete":
+			broadcast <- incoming
+		} else if incoming.Type == "delete" {
 			var author string
 			db.QueryRow("SELECT username FROM messages WHERE id=$1", incoming.ID).Scan(&author)
 			if author == client.username {
 				db.Exec("DELETE FROM messages WHERE id=$1", incoming.ID)
 				mu.Lock()
-				for c := range rooms[client.room] {
+				for c := range clients {
 					c.conn.WriteJSON(Message{Type: "delete", ID: incoming.ID})
 				}
 				mu.Unlock()
 			}
-
-		case "clear_chat":
+		} else if incoming.Type == "clear_chat" {
 			if client.username != "" {
-				db.Exec("DELETE FROM messages WHERE room=$1", client.room)
+				db.Exec("DELETE FROM messages")
 				mu.Lock()
-				for c := range rooms[client.room] {
+				for c := range clients {
 					c.conn.WriteJSON(Message{Type: "clear_chat"})
 				}
 				mu.Unlock()
 			}
 		}
+	}
+}
+
+func handleMessages() {
+	for msg := range broadcast {
+		mu.Lock()
+		for c := range clients {
+			c.conn.WriteJSON(msg)
+		}
+		mu.Unlock()
 	}
 }
 
@@ -225,13 +190,9 @@ func uploadHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	username := r.FormValue("username")
-	room := r.FormValue("room")
 	if username == "" {
 		http.Error(w, "username required", http.StatusBadRequest)
 		return
-	}
-	if room == "" {
-		room = "public"
 	}
 	r.ParseMultipartForm(10 << 20)
 	file, handler, err := r.FormFile("file")
@@ -249,7 +210,6 @@ func uploadHandler(w http.ResponseWriter, r *http.Request) {
 		ID:        uuid.New().String(),
 		Username:  username,
 		Text:      handler.Filename,
-		Room:      room,
 		IsFile:    true,
 		FileName:  handler.Filename,
 		Type:      "msg",
@@ -257,13 +217,7 @@ func uploadHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	saveMessageToDB(msg, data)
 	msg.FileUrl = "/api/file/" + msg.ID
-	mu.Lock()
-	if rroom, ok := rooms[room]; ok {
-		for c := range rroom {
-			c.conn.WriteJSON(msg)
-		}
-	}
-	mu.Unlock()
+	broadcast <- msg
 	w.Write([]byte(msg.FileUrl))
 }
 
